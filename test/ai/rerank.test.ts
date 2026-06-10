@@ -154,6 +154,27 @@ describe('gateway.rerank() — happy path', () => {
 describe('gateway.rerank() — error classification', () => {
   beforeEach(() => configureZE());
 
+  test('missing reranker API key → auth before transport', async () => {
+    configureGateway({
+      reranker_model: 'zeroentropyai:zerank-2',
+      env: {},
+    });
+    let called = false;
+    __setRerankTransportForTests(async () => {
+      called = true;
+      return mockResp({ results: [] });
+    });
+    try {
+      await rerank({ query: 'q', documents: ['d'] });
+      throw new Error('should have thrown');
+    } catch (err) {
+      expect(err).toBeInstanceOf(RerankError);
+      expect((err as RerankError).reason).toBe('auth');
+      expect((err as RerankError).message).toContain('ZEROENTROPY_API_KEY');
+      expect(called).toBe(false);
+    }
+  });
+
   test('401 → auth', async () => {
     __setRerankTransportForTests(async () => new Response('Unauthorized', { status: 401 }));
     try {
