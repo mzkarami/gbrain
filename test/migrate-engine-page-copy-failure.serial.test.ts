@@ -23,7 +23,7 @@ import { mkdtempSync, rmSync, readFileSync, existsSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
-import { copyPageToTarget, runMigrateEngine } from '../src/commands/migrate-engine.ts';
+import { copyMigrationLinksForPage, copyPageToTarget, runMigrateEngine } from '../src/commands/migrate-engine.ts';
 import { saveConfig, loadConfigFileOnly } from '../src/core/config.ts';
 import { currentExitCode, _resetCliExitVerdictForTests } from '../src/core/cli-force-exit.ts';
 import type { BrainEngine } from '../src/core/engine.ts';
@@ -106,6 +106,70 @@ describe('copyPageToTarget — undefined-column normalization (#3194)', () => {
     const call = putPageCalls[0] as { page: Record<string, unknown> };
     expect(call.page.content_hash).toBe('abc123');
     expect(call.page.type).toBe('note');
+  });
+});
+
+describe('copyMigrationLinksForPage — cross-source targets (#3859)', () => {
+  test('preserves the target source returned by getLinks', async () => {
+    const addLinkCalls: unknown[][] = [];
+    const source = {
+      getLinks: async (slug: string, opts: unknown) => {
+        expect(slug).toBe('people/alice');
+        expect(opts).toEqual({ sourceId: 'default' });
+        return [{
+          from_slug: 'people/alice',
+          from_source_id: 'default',
+          to_slug: 'companies/acme',
+          to_source_id: 'company-wiki',
+          context: 'Alice works at Acme',
+          link_type: 'works_at',
+        }];
+      },
+    } as unknown as BrainEngine;
+    const target = {
+      addLink: async (...args: unknown[]) => {
+        addLinkCalls.push(args);
+      },
+    } as unknown as BrainEngine;
+
+    await copyMigrationLinksForPage(
+      source,
+      target,
+      'default',
+      'people/alice',
+    );
+
+    expect(addLinkCalls).toHaveLength(1);
+    expect(addLinkCalls[0]?.[7]).toEqual({
+      fromSourceId: 'default',
+      toSourceId: 'company-wiki',
+    });
+  });
+
+  test('skips a failed target using its actual source-qualified key', async () => {
+    let addLinkCalls = 0;
+    const source = {
+      getLinks: async () => [{
+        from_slug: 'people/alice',
+        to_slug: 'companies/acme',
+        to_source_id: 'company-wiki',
+        context: '',
+        link_type: 'related',
+      }],
+    } as unknown as BrainEngine;
+    const target = {
+      addLink: async () => { addLinkCalls += 1; },
+    } as unknown as BrainEngine;
+
+    await copyMigrationLinksForPage(
+      source,
+      target,
+      'default',
+      'people/alice',
+      new Set(['company-wiki::companies/acme']),
+    );
+
+    expect(addLinkCalls).toBe(0);
   });
 });
 

@@ -108,6 +108,30 @@ interface MigratedSourceRow {
   created_at: Date | string;
 }
 
+export function makeMigrationManifestKey(sourceId: string, slug: string): string {
+  return sourceId === 'default' ? slug : `${sourceId}::${slug}`;
+}
+
+export async function copyMigrationLinksForPage(
+  source: BrainEngine,
+  target: BrainEngine,
+  pageSourceId: string,
+  pageSlug: string,
+  failedKeys: ReadonlySet<string> = new Set(),
+): Promise<void> {
+  const links = await source.getLinks(pageSlug, { sourceId: pageSourceId });
+  for (const link of links) {
+    const toSourceId = link.to_source_id ?? pageSourceId;
+    if (failedKeys.has(makeMigrationManifestKey(toSourceId, link.to_slug))) continue;
+    await target.addLink(
+      link.from_slug, link.to_slug,
+      link.context, link.link_type,
+      undefined, undefined, undefined,
+      { fromSourceId: pageSourceId, toSourceId },
+    );
+  }
+}
+
 export async function copyMigrationSources(source: BrainEngine, target: BrainEngine): Promise<void> {
   const sources = await source.executeRaw<MigratedSourceRow>(`
     SELECT id, name, local_path, last_commit, last_sync_at, config::text AS config_json, archived,
@@ -317,8 +341,6 @@ export async function runMigrateEngine(sourceEngine: BrainEngine, args: string[]
   // entries were bare slugs; we keep treating those as default-source for
   // back-compat resume.
   const completedSet = new Set(manifest?.completed_slugs || []);
-  const makeManifestKey = (sourceId: string, slug: string): string =>
-    sourceId === 'default' ? slug : `${sourceId}::${slug}`;
   if (!manifest) {
     manifest = {
       completed_slugs: [],
@@ -344,7 +366,7 @@ export async function runMigrateEngine(sourceEngine: BrainEngine, args: string[]
   // Get all source pages
   const sourceStats = await sourceEngine.getStats();
   const allPages = await sourceEngine.listPages({ limit: 100000 });
-  const pagesToMigrate = allPages.filter(p => !completedSet.has(makeManifestKey(p.source_id, p.slug)));
+  const pagesToMigrate = allPages.filter(p => !completedSet.has(makeMigrationManifestKey(p.source_id, p.slug)));
 
   console.log(`Migrating ${pagesToMigrate.length} pages (${allPages.length} total, ${completedSet.size} already done)...`);
 
@@ -362,7 +384,7 @@ export async function runMigrateEngine(sourceEngine: BrainEngine, args: string[]
     try {
       await copyPageToTarget(sourceEngine, targetEngine, page);
       // Track progress with composite key so multi-source resume is correct.
-      manifest!.completed_slugs.push(makeManifestKey(page.source_id, page.slug));
+      manifest!.completed_slugs.push(makeMigrationManifestKey(page.source_id, page.slug));
       saveManifest(manifest!);
       migrated++;
     } catch (e) {
@@ -401,25 +423,21 @@ export async function runMigrateEngine(sourceEngine: BrainEngine, args: string[]
   // whole phase (the exact "addLink failed: page ... not found" crash from
   // the original report). Skip links on either end of a known-failed page —
   // a retry that successfully copies the page also re-copies its links.
-  const failedKeys = new Set(failures.map(f => makeManifestKey(f.source_id, f.slug)));
+  const failedKeys = new Set(failures.map(f => makeMigrationManifestKey(f.source_id, f.slug)));
   console.log('Copying links...');
   progress.start('migrate.copy_links', allPages.length);
   for (const page of allPages) {
-    if (failedKeys.has(makeManifestKey(page.source_id, page.slug))) {
+    if (failedKeys.has(makeMigrationManifestKey(page.source_id, page.slug))) {
       progress.tick(1);
       continue;
     }
-    const sourceOpts = { sourceId: page.source_id };
-    const links = await sourceEngine.getLinks(page.slug, sourceOpts);
-    for (const link of links) {
-      if (failedKeys.has(makeManifestKey(page.source_id, link.to_slug))) continue;
-      await targetEngine.addLink(
-        link.from_slug, link.to_slug,
-        link.context, link.link_type,
-        undefined, undefined, undefined,
-        { fromSourceId: page.source_id, toSourceId: page.source_id },
-      );
-    }
+    await copyMigrationLinksForPage(
+      sourceEngine,
+      targetEngine,
+      page.source_id,
+      page.slug,
+      failedKeys,
+    );
     progress.tick(1);
   }
   progress.finish();
